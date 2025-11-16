@@ -25,6 +25,16 @@ public class TreeNode {
     private String replicaId;
     private boolean deleted;
 
+    public TreeNode(TreeNode other) {
+        this.id = other.id;
+        this.parentId = other.parentId;
+        this.name = other.name;
+        this.type = other.type;
+        this.timestamp = other.timestamp;
+        this.replicaId = other.replicaId;
+        this.deleted = other.deleted;
+    }
+
     /**
      * Check if this node is a root node (no parent)
      */

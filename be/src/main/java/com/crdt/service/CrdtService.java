@@ -3,11 +3,11 @@ package com.crdt.service;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -63,13 +63,7 @@ public class CrdtService {
 
             state.setReplicaId(replicaId);
             state.setVectorClock(serializeVectorClock(crdtTree.getVectorClock()));
-
-            // Get the latest timestamp from this replica's perspective
-            Long lastTimestamp = crdtTree.getVectorClock().get(replicaId);
-            if (lastTimestamp != null) {
-                state.setLastOperationTimestamp(lastTimestamp);
-            }
-
+            state.setLastOperationTimestamp(hlcService.getLatestHlc().asLong());
             state.setLastHeartbeat(java.time.LocalDateTime.now());
             state.setIsActive(false);
 
@@ -81,344 +75,317 @@ public class CrdtService {
     }
 
     /**
-     * Initialize CRDT Tree on startup
-     * Loads ALL non-deleted files from database (from all replicas) to ensure CRDT
-     * tree is in sync
+     * Initializes the CRDT Tree on startup by replaying all historical operations
+     * from the database in timestamp order. This ensures the in-memory tree state
+     * is correct and converged.
      */
     public void initializeCrdtTree() {
         this.crdtTree = new CrdtTree(replicaId);
         log.info("Initializing CRDT Tree for replica: {}", replicaId);
 
-        Optional<ReplicaState> stateOpt = replicaStateRepository.findByReplicaId(replicaId);
-        List<CrdtOperation> operationsToReplay;
-
-        if (stateOpt.isPresent()) {
-            log.info("Found existing replica state. Rebuilding from last known state.");
-            ReplicaState state = stateOpt.get();
-            Map<String, Long> persistedClock = deserializeVectorClock(state.getVectorClock());
-            crdtTree.setVectorClock(new java.util.concurrent.ConcurrentHashMap<>(persistedClock));
-
-            // Find the oldest timestamp we have recorded from any *other* replica.
-            // This is the safest point to start replaying from to ensure we don't miss
-            // anything.
-            long catchUpTimestamp = persistedClock.entrySet().stream()
-                    .filter(entry -> !entry.getKey().equals(replicaId))
-                    .mapToLong(Map.Entry::getValue)
-                    .min()
-                    .orElse(0L);
-
-            log.info("Catch-up timestamp set to: {}. Fetching operations since then.", catchUpTimestamp);
-            operationsToReplay = crdtOperationRepository.findByTimestampGreaterThanOrderByTimestamp(catchUpTimestamp);
-
-        } else {
-            log.info("No replica state found. Rebuilding from the beginning of the operation log.");
-            operationsToReplay = crdtOperationRepository.findAll(org.springframework.data.domain.Sort.by("timestamp"));
-        }
+        // Fetch all operations from the database, strictly ordered by timestamp.
+        List<CrdtOperation> operationsToReplay = crdtOperationRepository.findAll(Sort.by("timestamp"));
 
         log.info("Replaying {} operations to build in-memory CRDT tree...", operationsToReplay.size());
         for (CrdtOperation op : operationsToReplay) {
-            // Apply operation to the in-memory tree only.
-            // The database state is assumed to be the source of truth already.
-            crdtTree.merge(op);
+            // Update HLC with each operation's timestamp to ensure the clock is up-to-date.
+            hlcService.updateWithRemoteTimestamp(HybridLogicalClock.fromLong(op.getTimestamp()));
+            // Apply the operation to the in-memory tree.
+            // Since operations are sorted, this will not trigger the undo-redo path,
+            // making initialization efficient.
+            crdtTree.applyOperation(op);
         }
 
-        log.info("CRDT Tree initialized successfully with vector clock: {}", crdtTree.getVectorClock());
+        log.info("CRDT Tree initialized successfully. Final vector clock: {}", crdtTree.getVectorClock());
     }
 
     /**
-     * Create a new folder
+     * Creates a new folder. This is modeled as a MOVE operation where the node is
+     * "moved" from a null parent into the tree.
      */
-    public FileNode createFolder(String name, UUID parentId, UUID userId) {
+    public CrdtServiceResult createFolder(String name, UUID parentId, UUID userId) {
         User owner = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with id: " + userId));
 
         UUID nodeId = UUID.randomUUID();
-        Long timestamp = hlcService.newTimestamp().asLong();
+        long timestamp = hlcService.newTimestamp().asLong();
+        UUID effectiveParentId = (parentId != null) ? parentId : CrdtTree.VIRTUAL_ROOT_ID;
 
-        // Apply to CRDT tree first to get the updated vector clock
-        crdtTree.addNode(nodeId, parentId, name, FileNode.FileType.FOLDER, timestamp, replicaId);
-        String currentVectorClock = serializeVectorClock(crdtTree.getVectorClock());
+        CrdtOperation operation = CrdtOperation.builder()
+                .id(UUID.randomUUID())
+                .nodeId(nodeId)
+                .parentId(effectiveParentId)
+                .oldParentId(null) // `null` oldParentId signifies creation
+                .nodeName(name)
+                .nodeType(FileNode.FileType.FOLDER)
+                .replicaId(replicaId)
+                .timestamp(timestamp)
+                .isApplied(true)
+                .build();
 
-        // Create CRDT operation
-        CrdtOperation operation = new CrdtOperation();
-        operation.setType(CrdtOperation.OperationType.CREATE);
-        operation.setNodeId(nodeId);
-        operation.setParentId(parentId);
-        operation.setNodeName(name);
-        operation.setNodeType(FileNode.FileType.FOLDER);
-        operation.setReplicaId(replicaId);
-        operation.setTimestamp(timestamp);
-        operation.setVectorClock(currentVectorClock);
-        operation.setIsApplied(true); // Local operations are always applied
-
-        // Create file node in database
-        FileNode fileNode = new FileNode();
-        fileNode.setId(nodeId);
-        fileNode.setParentId(parentId);
-        fileNode.setName(name);
-        fileNode.setType(FileNode.FileType.FOLDER);
-        fileNode.setReplicaId(replicaId);
-        fileNode.setTimestamp(timestamp);
-        fileNode.setVectorClock(currentVectorClock);
-        fileNode.setIsDeleted(false);
-        fileNode.setOwner(owner);
-
-        FileNode savedNode = fileNodeRepository.save(fileNode);
-        crdtOperationRepository.save(operation);
-
-        // Broadcast operation to other replicas
-        broadcastOperation(operation);
-
-        // Emit realtime event
-        publishEvent("file.created", buildNodeEventPayload(savedNode));
-
-        return savedNode;
+        // Apply and persist
+        return applyAndPersist(operation, owner);
     }
 
     /**
-     * Create a new file (metadata) and add to CRDT
+     * Creates a new file metadata entry. Also modeled as a MOVE from a null parent.
      */
-    public FileNode createFile(String name, UUID parentId, Long fileSize, String mimeType, String filePath,
+    public CrdtServiceResult createFile(String name, UUID parentId, Long fileSize, String mimeType, String filePath,
             UUID userId) {
         User owner = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with id: " + userId));
 
         UUID nodeId = UUID.randomUUID();
-        Long timestamp = hlcService.newTimestamp().asLong();
+        long timestamp = hlcService.newTimestamp().asLong();
+        UUID effectiveParentId = (parentId != null) ? parentId : CrdtTree.VIRTUAL_ROOT_ID;
 
-        // Apply to CRDT tree
-        crdtTree.addNode(nodeId, parentId, name, FileNode.FileType.FILE, timestamp, replicaId);
-        String currentVectorClock = serializeVectorClock(crdtTree.getVectorClock());
+        CrdtOperation operation = CrdtOperation.builder()
+                .id(UUID.randomUUID())
+                .nodeId(nodeId)
+                .parentId(effectiveParentId)
+                .oldParentId(null) // `null` oldParentId signifies creation
+                .nodeName(name)
+                .nodeType(FileNode.FileType.FILE)
+                .replicaId(replicaId)
+                .timestamp(timestamp)
+                .isApplied(true)
+                .build();
 
-        CrdtOperation operation = new CrdtOperation();
-        operation.setType(CrdtOperation.OperationType.CREATE);
-        operation.setNodeId(nodeId);
-        operation.setParentId(parentId);
-        operation.setNodeName(name);
-        operation.setNodeType(FileNode.FileType.FILE);
-        operation.setReplicaId(replicaId);
-        operation.setTimestamp(timestamp);
-        operation.setVectorClock(currentVectorClock);
-        operation.setIsApplied(true);
+        CrdtServiceResult result = applyAndPersist(operation, owner);
+        FileNode newNode = result.getFileNode();
 
-        // Create file node in database with metadata
-        FileNode fileNode = new FileNode();
-        fileNode.setId(nodeId);
-        fileNode.setParentId(parentId);
-        fileNode.setName(name);
-        fileNode.setType(FileNode.FileType.FILE);
-        fileNode.setFileSize(fileSize);
-        fileNode.setMimeType(mimeType);
-        fileNode.setFilePath(filePath);
-        fileNode.setReplicaId(replicaId);
-        fileNode.setTimestamp(timestamp);
-        fileNode.setVectorClock(currentVectorClock);
-        fileNode.setIsDeleted(false);
-        fileNode.setOwner(owner);
-
-        FileNode saved = fileNodeRepository.save(fileNode);
-        crdtOperationRepository.save(operation);
-
-        broadcastOperation(operation);
-
-        // Emit realtime event
-        publishEvent("file.created", buildNodeEventPayload(saved));
-
-        return saved;
+        // Update physical file attributes
+        newNode.setFileSize(fileSize);
+        newNode.setMimeType(mimeType);
+        newNode.setFilePath(filePath);
+        FileNode savedNode = fileNodeRepository.save(newNode);
+        return new CrdtServiceResult(savedNode, result.getOperation());
     }
 
     /**
-     * Move a file/folder
+     * Moves a file or folder. This is the canonical MOVE operation.
      */
-    public FileNode moveFile(UUID nodeId, UUID newParentId) {
+    public CrdtServiceResult moveFile(UUID nodeId, UUID newParentId) {
+        FileNode fileNode = fileNodeRepository.findById(nodeId)
+                .orElseThrow(() -> new ResourceNotFoundException("File not found with id: " + nodeId));
+
+        long timestamp = hlcService.newTimestamp().asLong();
+        UUID effectiveParentId = (newParentId != null) ? newParentId : CrdtTree.VIRTUAL_ROOT_ID;
+
+        CrdtOperation operation = CrdtOperation.builder()
+                .id(UUID.randomUUID())
+                .nodeId(nodeId)
+                .parentId(effectiveParentId)
+                .oldParentId(fileNode.getParentId())
+                .nodeName(fileNode.getName()) // Name doesn't change in a pure move
+                .oldNodeName(fileNode.getName())
+                .nodeType(fileNode.getType())
+                .replicaId(replicaId)
+                .timestamp(timestamp)
+                .isApplied(true)
+                .build();
+
+        return applyAndPersist(operation, fileNode.getOwner());
+    }
+
+    /**
+     * Deletes a file or folder. This is modeled as a MOVE to a special "trash"
+     * parent node.
+     */
+    public CrdtServiceResult deleteFile(UUID nodeId) {
         FileNode fileNode = fileNodeRepository.findById(nodeId)
                 .orElseThrow(() -> new ResourceNotFoundException("File not found with id: " + nodeId));
 
         if (fileNode.getIsDeleted()) {
-            throw new RuntimeException("Cannot move deleted file");
+            throw new IllegalStateException("File is already deleted.");
         }
 
-        UUID oldParentId = fileNode.getParentId();
-        Long timestamp = hlcService.newTimestamp().asLong();
+        long timestamp = hlcService.newTimestamp().asLong();
 
-        // Apply to CRDT tree
-        crdtTree.moveNode(nodeId, newParentId, timestamp, replicaId);
-        String currentVectorClock = serializeVectorClock(crdtTree.getVectorClock());
+        CrdtOperation operation = CrdtOperation.builder()
+                .id(UUID.randomUUID())
+                .nodeId(nodeId)
+                .parentId(CrdtTree.TRASH_ROOT_ID) // Move to trash
+                .oldParentId(fileNode.getParentId())
+                .nodeName(fileNode.getName())
+                .oldNodeName(fileNode.getName())
+                .nodeType(fileNode.getType())
+                .replicaId(replicaId)
+                .timestamp(timestamp)
+                .isApplied(true)
+                .build();
 
-        // Create CRDT operation
-        CrdtOperation operation = new CrdtOperation();
-        operation.setType(CrdtOperation.OperationType.MOVE);
-        operation.setNodeId(nodeId);
-        operation.setParentId(newParentId);
-        operation.setOldParentId(oldParentId);
-        operation.setNodeName(fileNode.getName());
-        operation.setNodeType(fileNode.getType());
-        operation.setReplicaId(replicaId);
-        operation.setTimestamp(timestamp);
-        operation.setVectorClock(currentVectorClock);
-        operation.setIsApplied(true);
-
-        // Update file node in database
-        fileNode.setParentId(newParentId);
-        fileNode.setTimestamp(timestamp);
-        fileNode.setVectorClock(currentVectorClock);
-
-        FileNode savedNode = fileNodeRepository.save(fileNode);
-        crdtOperationRepository.save(operation);
-
-        // Broadcast operation to other replicas
-        broadcastOperation(operation);
-
-        publishEvent("file.moved", buildNodeEventPayload(savedNode));
-
-        return savedNode;
+        return applyAndPersist(operation, fileNode.getOwner());
     }
 
     /**
-     * Delete a file/folder
+     * Updates a file/folder name. This is modeled as a MOVE to the same parent but
+     * with new metadata (the name).
      */
-    public void deleteFile(UUID nodeId) {
+    public CrdtServiceResult updateFile(UUID nodeId, String newName) {
         FileNode fileNode = fileNodeRepository.findById(nodeId)
                 .orElseThrow(() -> new ResourceNotFoundException("File not found with id: " + nodeId));
 
         if (fileNode.getIsDeleted()) {
-            throw new RuntimeException("File already deleted");
+            throw new IllegalStateException("Cannot update a deleted file.");
         }
 
-        Long timestamp = hlcService.newTimestamp().asLong();
+        long timestamp = hlcService.newTimestamp().asLong();
 
-        // Apply to CRDT tree
-        crdtTree.deleteNode(nodeId, timestamp, replicaId);
-        String currentVectorClock = serializeVectorClock(crdtTree.getVectorClock());
+        CrdtOperation operation = CrdtOperation.builder()
+                .id(UUID.randomUUID())
+                .nodeId(nodeId)
+                .parentId(fileNode.getParentId()) // Parent does not change
+                .oldParentId(fileNode.getParentId())
+                .nodeName(newName)
+                .oldNodeName(fileNode.getName()) // Capture old name for undo
+                .nodeType(fileNode.getType())
+                .replicaId(replicaId)
+                .timestamp(timestamp)
+                .isApplied(true)
+                .build();
 
-        // Create CRDT operation
-        CrdtOperation operation = new CrdtOperation();
-        operation.setType(CrdtOperation.OperationType.DELETE);
-        operation.setNodeId(nodeId);
-        operation.setParentId(fileNode.getParentId());
-        operation.setNodeName(fileNode.getName());
-        operation.setNodeType(fileNode.getType());
-        operation.setReplicaId(replicaId);
-        operation.setTimestamp(timestamp);
-        operation.setVectorClock(currentVectorClock);
-        operation.setIsApplied(true);
-
-        // Update file node in database
-        fileNode.setIsDeleted(true);
-        fileNode.setTimestamp(timestamp);
-        fileNode.setVectorClock(currentVectorClock);
-
-        fileNodeRepository.save(fileNode);
-        crdtOperationRepository.save(operation);
-
-        // Broadcast operation to other replicas
-        broadcastOperation(operation);
-
-        publishEvent("file.deleted", buildNodeEventPayload(fileNode));
+        return applyAndPersist(operation, fileNode.getOwner());
     }
 
     /**
-     * Update file/folder name
+     * Processes an operation from an external source (another replica via Redis or
+     * sync).
      */
-    public FileNode updateFile(UUID nodeId, String newName) {
-        FileNode fileNode = fileNodeRepository.findById(nodeId)
-                .orElseThrow(() -> new ResourceNotFoundException("File not found with id: " + nodeId));
-
-        if (fileNode.getIsDeleted()) {
-            throw new RuntimeException("Cannot update deleted file");
+    public void processExternalOperation(CrdtOperation operation) {
+        if (this.replicaId.equals(operation.getReplicaId())) {
+            return; // Avoid processing our own broadcasted operations.
         }
 
-        Long timestamp = hlcService.newTimestamp().asLong();
+        // CRITICAL: Update local HLC with the timestamp from the remote operation.
+        hlcService.updateWithRemoteTimestamp(HybridLogicalClock.fromLong(operation.getTimestamp()));
 
-        // Apply to CRDT tree
-        crdtTree.updateNode(nodeId, newName, timestamp, replicaId);
-        String currentVectorClock = serializeVectorClock(crdtTree.getVectorClock());
+        // Apply the operation to the in-memory CRDT tree.
+        crdtTree.applyOperation(operation);
 
-        // Create CRDT operation
-        CrdtOperation operation = new CrdtOperation();
-        operation.setType(CrdtOperation.OperationType.UPDATE);
-        operation.setNodeId(nodeId);
-        operation.setParentId(fileNode.getParentId());
-        operation.setNodeName(newName);
-        operation.setNodeType(fileNode.getType());
-        operation.setReplicaId(replicaId);
-        operation.setTimestamp(timestamp);
-        operation.setVectorClock(currentVectorClock);
-        operation.setIsApplied(true);
+        // Persist the converged state of the affected node to the database.
+        persistNodeState(operation.getNodeId(), null);
 
-        // Update file node in database
-        fileNode.setName(newName);
-        fileNode.setTimestamp(timestamp);
-        fileNode.setVectorClock(currentVectorClock);
+        // Mark the operation as applied in the database if it exists.
+        crdtOperationRepository.findById(operation.getId()).ifPresent(op -> {
+            if (op.getIsApplied() == null || !op.getIsApplied()) {
+                op.setIsApplied(true);
+                crdtOperationRepository.save(op);
+            }
+        });
 
-        FileNode savedNode = fileNodeRepository.save(fileNode);
-        crdtOperationRepository.save(operation);
-
-        // Broadcast operation to other replicas
-        broadcastOperation(operation);
-
-        publishEvent("file.updated", buildNodeEventPayload(savedNode));
-        return savedNode;
+        // Publish event for real-time UI updates.
+        publishEvent("file.externally_modified", buildNodeEventPayload(crdtTree.getNode(operation.getNodeId())));
     }
 
     /**
-     * Get tree structure
+     * Centralized method to apply an operation to the CRDT tree and persist the
+     * results.
+     *
+     * @param operation The operation to apply.
+     * @param owner     The owner of the node (for creation).
+     * @return The persisted FileNode with the converged state and the operation.
      */
-    public Map<String, Object> getTreeStructure() {
-        return crdtTree.getTreeStructure();
+    private CrdtServiceResult applyAndPersist(CrdtOperation operation, User owner) {
+        // 1. Apply to the in-memory CRDT tree. This is the source of truth.
+        crdtTree.applyOperation(operation);
+
+        // 2. Persist the operation itself to the log.
+        operation.setVectorClock(serializeVectorClock(crdtTree.getVectorClock()));
+        CrdtOperation savedOperation = crdtOperationRepository.save(operation);
+
+        // 3. Persist the converged state of the node to the database.
+        FileNode persistedNode = persistNodeState(operation.getNodeId(), owner);
+
+        // 4. Broadcast to other replicas.
+        broadcastOperation(savedOperation);
+
+        // 5. Publish event for local UI.
+        publishEvent("file.locally_modified", buildNodeEventPayload(persistedNode));
+
+        return new CrdtServiceResult(persistedNode, savedOperation);
     }
 
     /**
-     * Sync with other replicas by fetching operations we haven't seen yet,
-     * based on our current vector clock.
+     * Persists the converged state of a node from the in-memory tree to the
+     * database.
+     *
+     * @param nodeId The ID of the node to persist.
+     * @param owner  The user who owns the file (used only for creation).
+     * @return The saved FileNode entity.
+     */
+    private FileNode persistNodeState(UUID nodeId, User owner) {
+        // Get the converged, authoritative state from the CRDT tree.
+        TreeNode treeNode = crdtTree.getNode(nodeId);
+
+        if (treeNode == null) {
+            // This can happen if the node was created and then removed in the same
+            // undo/redo cycle.
+            // We can treat this as a deletion.
+            fileNodeRepository.findById(nodeId).ifPresent(fileNode -> {
+                if (!fileNode.getIsDeleted()) {
+                    fileNode.setIsDeleted(true);
+                    fileNodeRepository.save(fileNode);
+                }
+            });
+            return null;
+        }
+
+        FileNode fileNode = fileNodeRepository.findById(nodeId).orElse(new FileNode());
+
+        // If it's a new node, set ID and owner.
+        if (fileNode.getId() == null) {
+            fileNode.setId(treeNode.getId());
+            fileNode.setOwner(owner);
+        }
+
+        // Update attributes from the converged TreeNode state.
+        fileNode.setName(treeNode.getName());
+        fileNode.setParentId(treeNode.getParentId());
+        fileNode.setType(treeNode.getType());
+        fileNode.setIsDeleted(treeNode.isDeleted());
+        fileNode.setTimestamp(treeNode.getTimestamp());
+        fileNode.setReplicaId(treeNode.getReplicaId());
+        fileNode.setVectorClock(serializeVectorClock(crdtTree.getVectorClock()));
+
+        return fileNodeRepository.save(fileNode);
+    }
+
+    /**
+     * Syncs with other replicas by fetching operations newer than our last known
+     * timestamp for each replica.
      */
     public void syncWithReplicas() {
         publishEvent("sync.started", Map.of("replicaId", replicaId));
         log.debug("Starting sync for replica {}. Current vector clock: {}", replicaId, crdtTree.getVectorClock());
 
-        // Discover all replicas that have ever made an operation
         List<String> allReplicaIds = crdtOperationRepository.findDistinctReplicaIds();
         int totalSynced = 0;
 
         for (String otherReplicaId : allReplicaIds) {
             if (otherReplicaId.equals(this.replicaId)) {
-                continue; // Skip syncing with ourselves
+                continue;
             }
 
-            // Get the last timestamp we've seen from this replica
             long lastSeenTimestamp = crdtTree.getVectorClock().getOrDefault(otherReplicaId, 0L);
-
-            // Fetch all operations from that replica that are newer than what we've seen
             List<CrdtOperation> newOperations = crdtOperationRepository
                     .findByReplicaIdAndTimestampGreaterThanOrderByTimestamp(otherReplicaId, lastSeenTimestamp);
 
             if (!newOperations.isEmpty()) {
                 log.info("Found {} new operations from replica {}", newOperations.size(), otherReplicaId);
-                for (CrdtOperation operation : newOperations) {
-                    try {
-                        // Process each operation as if it came from an external source
-                        processExternalOperation(operation);
-                    } catch (Exception e) {
-                        log.error("Error processing synced operation {} from replica {}",
-                                operation.getId(), otherReplicaId, e);
-                        // For now, we log and continue to not block other syncs.
-                    }
-                }
+                newOperations.forEach(this::processExternalOperation);
                 totalSynced += newOperations.size();
             }
         }
 
         if (totalSynced > 0) {
-            log.info("Synced {} total operations from other replicas", totalSynced);
+            log.info("Synced {} total operations from other replicas.", totalSynced);
             publishEvent("sync.completed", Map.of("replicaId", replicaId, "count", totalSynced));
         } else {
             log.debug("No new operations to sync from other replicas.");
         }
     }
 
-    /**
-     * Broadcast operation to other replicas via Redis
-     */
     private void broadcastOperation(CrdtOperation operation) {
         try {
             redisTemplate.convertAndSend("crdt:operations", operation);
@@ -427,99 +394,15 @@ public class CrdtService {
         }
     }
 
-    /**
-     * Apply operation to database
-     */
-    private void applyOperationToDatabase(CrdtOperation operation) {
-        Optional<FileNode> existingNodeOpt = fileNodeRepository.findById(operation.getNodeId());
-
-        // LWW check: Only apply if the incoming operation is newer than the existing
-        // state
-        if (existingNodeOpt.isPresent() && operation.getTimestamp() <= existingNodeOpt.get().getTimestamp()) {
-            log.warn("Skipping older operation {} for node {}", operation.getType(), operation.getNodeId());
-            return;
-        }
-
-        switch (operation.getType()) {
-            case CREATE:
-                if (existingNodeOpt.isEmpty()) {
-                    FileNode newNode = new FileNode();
-                    newNode.setId(operation.getNodeId());
-                    newNode.setParentId(operation.getParentId());
-                    newNode.setName(operation.getNodeName());
-                    newNode.setType(
-                            operation.getNodeType() != null ? operation.getNodeType() : FileNode.FileType.FOLDER);
-                    newNode.setReplicaId(operation.getReplicaId());
-                    newNode.setTimestamp(operation.getTimestamp());
-                    newNode.setVectorClock(operation.getVectorClock());
-                    newNode.setIsDeleted(false);
-                    fileNodeRepository.save(newNode);
-                }
-                break;
-
-            case UPDATE:
-                existingNodeOpt.ifPresent(node -> {
-                    node.setName(operation.getNodeName());
-                    node.setTimestamp(operation.getTimestamp());
-                    node.setReplicaId(operation.getReplicaId());
-                    node.setVectorClock(operation.getVectorClock());
-                    fileNodeRepository.save(node);
-                });
-                break;
-
-            case DELETE:
-                existingNodeOpt.ifPresent(node -> {
-                    node.setIsDeleted(true);
-                    node.setTimestamp(operation.getTimestamp());
-                    node.setReplicaId(operation.getReplicaId());
-                    node.setVectorClock(operation.getVectorClock());
-                    fileNodeRepository.save(node);
-                });
-                break;
-
-            case MOVE:
-                existingNodeOpt.ifPresent(node -> {
-                    node.setParentId(operation.getParentId());
-                    node.setTimestamp(operation.getTimestamp());
-                    node.setReplicaId(operation.getReplicaId());
-                    node.setVectorClock(operation.getVectorClock());
-                    fileNodeRepository.save(node);
-                });
-                break;
-        }
-    }
-
-    /**
-     * Serialize vector clock to JSON string using Jackson.
-     */
     private String serializeVectorClock(Map<String, Long> vectorClock) {
         try {
             return objectMapper.writeValueAsString(vectorClock);
         } catch (JsonProcessingException e) {
             log.error("Failed to serialize vector clock: {}", vectorClock, e);
-            return "{}"; // Return empty JSON object on failure
+            return "{}";
         }
     }
 
-    private Map<String, Object> buildNodeEventPayload(FileNode node) {
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("id", node.getId());
-        payload.put("parentId", node.getParentId());
-        payload.put("name", node.getName());
-        payload.put("type", node.getType().toString());
-        payload.put("timestamp", node.getTimestamp());
-        payload.put("replicaId", node.getReplicaId());
-        return payload;
-    }
-
-    private void publishEvent(String type, Object data) {
-        CrdtOperationEvent event = new CrdtOperationEvent(this, type, data);
-        eventPublisher.publishEvent(event);
-    }
-
-    /**
-     * Deserialize vector clock from JSON string using Jackson.
-     */
     private Map<String, Long> deserializeVectorClock(String vectorClockJson) {
         if (vectorClockJson == null || vectorClockJson.isBlank()) {
             return new HashMap<>();
@@ -529,81 +412,77 @@ public class CrdtService {
             });
         } catch (JsonProcessingException e) {
             log.error("Failed to deserialize vector clock from JSON: {}", vectorClockJson, e);
-            return new HashMap<>(); // Return empty map on failure
+            return new HashMap<>();
         }
     }
 
-    /**
-     * Process external operation from other replicas
-     */
-    public void processExternalOperation(CrdtOperation operation) {
-        // Ensure operation is not from the current replica to avoid loops
-        if (this.replicaId.equals(operation.getReplicaId())) {
-            return;
-        }
-
-        // CRITICAL: Update local clock with the timestamp from the remote operation
-        // This ensures that any subsequent local operations will have a higher timestamp.
-        hlcService.updateWithRemoteTimestamp(HybridLogicalClock.fromLong(operation.getTimestamp()));
-
-        crdtTree.merge(operation);
-        applyOperationToDatabase(operation);
-
-        // Find the original operation in the DB to mark it as applied
-        crdtOperationRepository.findById(operation.getId()).ifPresent(op -> {
-            op.setIsApplied(true);
-            crdtOperationRepository.save(op);
-        });
-
-        // Emit event based on operation
-        String eventType = switch (operation.getType()) {
-            case CREATE -> "file.created";
-            case UPDATE -> "file.updated";
-            case DELETE -> "file.deleted";
-            case MOVE -> "file.moved";
-        };
-        publishEvent(eventType, Map.of(
-                "id", operation.getNodeId(),
-                "parentId", operation.getParentId(),
-                "name", operation.getNodeName(),
-                "replicaId", operation.getReplicaId(),
-                "timestamp", operation.getTimestamp(),
-                "type", operation.getNodeType() != null ? operation.getNodeType().toString() : null));
+    private Map<String, Object> buildNodeEventPayload(TreeNode node) {
+        if (node == null)
+            return Map.of();
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("id", node.getId());
+        payload.put("parentId", node.getParentId());
+        payload.put("name", node.getName());
+        payload.put("type", node.getType().toString());
+        payload.put("timestamp", node.getTimestamp());
+        payload.put("replicaId", node.getReplicaId());
+        payload.put("isDeleted", node.isDeleted());
+        return payload;
     }
 
-    /**
-     * Get operations since timestamp
-     */
+    private Map<String, Object> buildNodeEventPayload(FileNode node) {
+        if (node == null)
+            return Map.of();
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("id", node.getId());
+        payload.put("parentId", node.getParentId());
+        payload.put("name", node.getName());
+        payload.put("type", node.getType().toString());
+        payload.put("timestamp", node.getTimestamp());
+        payload.put("replicaId", node.getReplicaId());
+        payload.put("isDeleted", node.getIsDeleted());
+        return payload;
+    }
+
+    private void publishEvent(String type, Object data) {
+        eventPublisher.publishEvent(new CrdtOperationEvent(this, type, data));
+    }
+
+    // --- Read-only methods ---
+
+    public Map<String, Object> getTreeStructure() {
+        return crdtTree.getTreeStructure();
+    }
+
     public List<CrdtOperation> getOperationsSince(Long timestamp) {
         if (timestamp == null) {
-            return crdtOperationRepository.findByReplicaIdOrderByTimestamp(replicaId);
+            return crdtOperationRepository.findAll(Sort.by("timestamp"));
         }
         return crdtOperationRepository.findByTimestampGreaterThanOrderByTimestamp(timestamp);
     }
 
-    /**
-     * Get replica ID
-     */
     public String getReplicaId() {
         return replicaId;
     }
 
-    /**
-     * Get vector clock
-     */
     public Map<String, Long> getVectorClock() {
         return crdtTree.getVectorClock();
     }
 
-    /**
-     * Copy a node (file or folder) to target parent. For folders, copy subtree.
-     */
-    public FileNode copyNode(UUID sourceId, UUID targetParentId, UUID userId) {
+    public TreeNode getNode(UUID nodeId) {
+        return crdtTree.getNode(nodeId);
+    }
+
+    public java.util.Collection<TreeNode> getNodes() {
+        return crdtTree.getAllNodes();
+    }
+
+    public CrdtServiceResult copyNode(UUID sourceId, UUID targetParentId, UUID userId) {
         FileNode source = fileNodeRepository.findById(sourceId)
                 .orElseThrow(() -> new ResourceNotFoundException("Source node not found with id: " + sourceId));
 
         if (source.getIsDeleted()) {
-            throw new RuntimeException("Cannot copy deleted node");
+            throw new IllegalStateException("Cannot copy a deleted node.");
         }
 
         if (source.getType() == FileNode.FileType.FILE) {
@@ -617,12 +496,12 @@ public class CrdtService {
             }
         }
 
-        // Folder: create folder and recursively copy children
-        FileNode newFolder = createFolder(source.getName(), targetParentId, userId);
+        // Folder: create the new folder and recursively copy its children.
+        CrdtServiceResult newFolderResult = createFolder(source.getName(), targetParentId, userId);
         List<FileNode> children = fileNodeRepository.findByParentIdAndIsDeletedFalseOrderByName(sourceId);
         for (FileNode child : children) {
-            copyNode(child.getId(), newFolder.getId(), userId);
+            copyNode(child.getId(), newFolderResult.getFileNode().getId(), userId);
         }
-        return newFolder;
+        return newFolderResult;
     }
 }

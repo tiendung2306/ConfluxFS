@@ -72,38 +72,43 @@ export const useSyncStore = defineStore('sync', {
         },
 
         routeEvent(eventType, data) {
-            const fileStore = useFileStore()
+            const fileStore = useFileStore();
+            const toastStore = useToastStore();
             this.addOperation(eventType, data);
 
             switch (eventType) {
+                // Any event that modifies the tree structure
                 case 'file.created':
-                    fileStore._addNode(data);
-                    break
                 case 'file.updated':
-                    fileStore._updateNode(data);
-                    break
                 case 'file.deleted':
-                    fileStore._removeNode(data.id);
-                    break
                 case 'file.moved':
-                    // A move is a remove from the old parent and an add to the new one.
-                    fileStore._removeNode(data.id);
-                    fileStore._addNode(data);
-                    break
+                case 'file.locally_modified':
+                case 'file.externally_modified':
+                    // The most robust way to sync the UI is to refetch the canonical state from the server.
+                    console.log(`Received event '${eventType}', reloading file tree.`);
+                    fileStore.loadFiles();
+                    break;
+
+                // Events that affect connection/sync status
                 case 'sync.started':
-                    this.connectionStatus = 'Syncing'
-                    break
+                    this.connectionStatus = 'Syncing';
+                    break;
                 case 'sync.completed':
-                    this.connectionStatus = 'Connected'
-                    this.lastSyncTime = new Date()
-                    // No need to reload files anymore, but we might want to trigger a fetch if there were gaps.
-                    // For now, we rely on the periodic sync to catch up.
-                    break
+                    this.connectionStatus = 'Connected';
+                    this.lastSyncTime = new Date();
+                    // A sync might have merged operations, so reload the tree to be safe.
+                    fileStore.loadFiles();
+                    break;
                 case 'sync.conflict':
-                    this.addOperation('Sync Conflict', data)
-                    break
+                    toastStore.error('Xung đột đồng bộ. Đang tải lại trạng thái.');
+                    this.addOperation('Sync Conflict', data);
+                    fileStore.loadFiles();
+                    break;
+                
                 default:
-                    break
+                    // Ignore unknown events
+                    console.warn(`Received unknown event type: ${eventType}`);
+                    break;
             }
         },
 

@@ -37,9 +37,9 @@ export const useFileStore = defineStore('files', {
                     name,
                     parentId
                 })
-                // UI will be updated via WebSocket event
+                // UI will be updated via WebSocket event, which triggers loadFiles()
                 const toastStore = useToastStore()
-                toastStore.success('Tạo thư mục thành công')
+                toastStore.success('Yêu cầu tạo thư mục đã được gửi')
                 return { success: true, data: response.data }
             } catch (error) {
                 const toastStore = useToastStore()
@@ -66,14 +66,13 @@ export const useFileStore = defineStore('files', {
                     },
                     timeout: 300000, // 5 minutes for large file uploads
                     onUploadProgress: (progressEvent) => {
-                        // Optional: can emit progress event if needed
                         const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total)
                         console.log(`Upload progress: ${percentCompleted}%`)
                     }
                 })
                 // UI will be updated via WebSocket event
                 const toastStore = useToastStore()
-                toastStore.success('Tải file lên thành công')
+                toastStore.success('Yêu cầu tải file lên đã được gửi')
                 return { success: true, data: response.data }
             } catch (error) {
                 const toastStore = useToastStore()
@@ -93,7 +92,7 @@ export const useFileStore = defineStore('files', {
                 })
                 // UI will be updated via WebSocket event
                 const toastStore = useToastStore()
-                toastStore.success('Di chuyển file thành công')
+                toastStore.success('Yêu cầu di chuyển file đã được gửi')
                 return { success: true, data: response.data }
             } catch (error) {
                 const toastStore = useToastStore()
@@ -113,7 +112,7 @@ export const useFileStore = defineStore('files', {
                 })
                 // UI will be updated via WebSocket event
                 const toastStore = useToastStore()
-                toastStore.success('Sao chép thành công')
+                toastStore.success('Yêu cầu sao chép đã được gửi')
                 return { success: true, data: response.data }
             } catch (error) {
                 const toastStore = useToastStore()
@@ -131,7 +130,7 @@ export const useFileStore = defineStore('files', {
                 await api.delete(`/api/files/${fileId}`)
                 // UI will be updated via WebSocket event
                 const toastStore = useToastStore()
-                toastStore.success('Xóa file thành công')
+                toastStore.success('Yêu cầu xóa file đã được gửi')
                 return { success: true }
             } catch (error) {
                 const toastStore = useToastStore()
@@ -151,7 +150,7 @@ export const useFileStore = defineStore('files', {
                 })
                 // UI will be updated via WebSocket event
                 const toastStore = useToastStore()
-                toastStore.success('Đổi tên thành công')
+                toastStore.success('Yêu cầu đổi tên đã được gửi')
                 return { success: true, data: response.data }
             } catch (error) {
                 const toastStore = useToastStore()
@@ -170,67 +169,6 @@ export const useFileStore = defineStore('files', {
 
         clearSelectedFile() {
             this.selectedFile = null
-        },
-
-        // Internal actions for state manipulation
-        _addNode(node) {
-            const findAndAdd = (nodes, parentId, newNode) => {
-                if (parentId === null) {
-                    nodes.push(newNode);
-                    return true;
-                }
-                for (let i = 0; i < nodes.length; i++) {
-                    if (nodes[i].id === parentId) {
-                        if (!nodes[i].children) {
-                            nodes[i].children = [];
-                        }
-                        nodes[i].children.push(newNode);
-                        return true;
-                    }
-                    if (nodes[i].children && findAndAdd(nodes[i].children, parentId, newNode)) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            findAndAdd(this.files, node.parentId, { ...node, children: [] });
-        },
-
-        _removeNode(nodeId) {
-            const findAndRemove = (nodes, targetId) => {
-                for (let i = 0; i < nodes.length; i++) {
-                    if (nodes[i].id === targetId) {
-                        nodes.splice(i, 1);
-                        return true;
-                    }
-                    if (nodes[i].children && findAndRemove(nodes[i].children, targetId)) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            findAndRemove(this.files, nodeId);
-        },
-
-        _updateNode(nodeData) {
-            const findAndUpdate = (nodes, data) => {
-                for (let i = 0; i < nodes.length; i++) {
-                    if (nodes[i].id === data.id) {
-                        // Only update properties that are expected to change, like name.
-                        // Moves are handled separately by the 'file.moved' event.
-                        if (data.name !== undefined) {
-                            nodes[i].name = data.name;
-                        }
-                        // Add other updatable properties here if necessary
-                        return true;
-                    }
-                    if (nodes[i].children && findAndUpdate(nodes[i].children, data)) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            findAndUpdate(this.files, nodeData);
         }
     }
 })

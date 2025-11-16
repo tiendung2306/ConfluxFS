@@ -14,6 +14,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
@@ -22,17 +23,14 @@ import lombok.NoArgsConstructor;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@Builder(toBuilder = true)
 public class CrdtOperation {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
-    private OperationType type;
-
-    @Column(name = "node_id")
+    @Column(name = "node_id", nullable = false)
     private UUID nodeId;
 
     @Column(name = "parent_id")
@@ -43,6 +41,9 @@ public class CrdtOperation {
 
     @Column(name = "node_name")
     private String nodeName;
+
+    @Column(name = "old_node_name")
+    private String oldNodeName;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "node_type")
@@ -67,7 +68,4 @@ public class CrdtOperation {
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
-    public enum OperationType {
-        CREATE, UPDATE, DELETE, MOVE
-    }
 }

@@ -58,20 +58,25 @@ public class FileService {
                 file.getSize(),
                 file.getContentType(),
                 filePath.toString(),
-                userId);
+                userId).getFileNode();
     }
 
     public static class DuplicateResult {
         public String filePath;
         public long size;
-        public DuplicateResult(String filePath, long size) { this.filePath = filePath; this.size = size; }
+
+        public DuplicateResult(String filePath, long size) {
+            this.filePath = filePath;
+            this.size = size;
+        }
     }
 
     public DuplicateResult duplicateFile(String sourceFilePath, String originalFilename) throws IOException {
         return FileService.duplicateFileStatic(sourceFilePath, originalFilename, storagePath);
     }
 
-    public static DuplicateResult duplicateFileStatic(String sourceFilePath, String originalFilename, String storagePath) throws IOException {
+    public static DuplicateResult duplicateFileStatic(String sourceFilePath, String originalFilename,
+            String storagePath) throws IOException {
         Path source = Paths.get(sourceFilePath);
         if (!Files.exists(source)) {
             throw new IOException("Source file not found: " + sourceFilePath);

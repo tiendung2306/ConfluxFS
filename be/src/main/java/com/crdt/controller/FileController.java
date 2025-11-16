@@ -101,7 +101,7 @@ public class FileController {
             Authentication authentication) {
         try {
             User user = (User) authentication.getPrincipal();
-            FileNode folder = crdtService.createFolder(request.getName(), request.getParentId(), user.getId());
+            FileNode folder = crdtService.createFolder(request.getName(), request.getParentId(), user.getId()).getFileNode();
 
             FileNodeDto dto = convertToDto(folder);
             return ResponseEntity.ok(dto);
@@ -114,7 +114,7 @@ public class FileController {
     public ResponseEntity<?> updateFile(@PathVariable UUID id, @Valid @RequestBody UpdateFileRequest request,
             Authentication authentication) {
         try {
-            FileNode updatedFile = crdtService.updateFile(id, request.getName());
+            FileNode updatedFile = crdtService.updateFile(id, request.getName()).getFileNode();
 
             FileNodeDto dto = convertToDto(updatedFile);
             return ResponseEntity.ok(dto);
@@ -127,7 +127,7 @@ public class FileController {
     public ResponseEntity<?> deleteFile(@PathVariable UUID id, Authentication authentication) {
         try {
             crdtService.deleteFile(id);
-            return ResponseEntity.ok("File deleted successfully");
+            return ResponseEntity.ok(Map.of("message", "File deleted successfully"));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         }
@@ -137,7 +137,7 @@ public class FileController {
     public ResponseEntity<?> moveFile(@PathVariable UUID id, @Valid @RequestBody MoveFileRequest request,
             Authentication authentication) {
         try {
-            FileNode movedFile = crdtService.moveFile(id, request.getNewParentId());
+            FileNode movedFile = crdtService.moveFile(id, request.getNewParentId()).getFileNode();
 
             FileNodeDto dto = convertToDto(movedFile);
             return ResponseEntity.ok(dto);
@@ -151,7 +151,7 @@ public class FileController {
             Authentication authentication) {
         try {
             User user = (User) authentication.getPrincipal();
-            FileNode copied = crdtService.copyNode(id, request.getTargetParentId(), user.getId());
+            FileNode copied = crdtService.copyNode(id, request.getTargetParentId(), user.getId()).getFileNode();
             FileNodeDto dto = convertToDto(copied);
             return ResponseEntity.ok(dto);
         } catch (Exception e) {

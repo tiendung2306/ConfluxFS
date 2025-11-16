@@ -79,31 +79,29 @@ public class CrdtController {
     }
 
     private CrdtOperation convertToEntity(CrdtOperationDto dto) {
-        CrdtOperation operation = new CrdtOperation();
-        operation.setId(dto.getId());
-        operation.setType(CrdtOperation.OperationType.valueOf(dto.getType()));
-        operation.setNodeId(dto.getNodeId());
-        operation.setParentId(dto.getParentId());
-        operation.setOldParentId(dto.getOldParentId());
-        operation.setNodeName(dto.getNodeName());
-        if (dto.getNodeType() != null) {
-            operation.setNodeType(com.crdt.model.FileNode.FileType.valueOf(dto.getNodeType()));
-        }
-        operation.setReplicaId(dto.getReplicaId());
-        operation.setTimestamp(dto.getTimestamp());
-        operation.setVectorClock(dto.getVectorClock());
-        operation.setIsApplied(dto.isApplied());
-        return operation;
+        return CrdtOperation.builder()
+                .id(dto.getId())
+                .nodeId(dto.getNodeId())
+                .parentId(dto.getParentId())
+                .oldParentId(dto.getOldParentId())
+                .nodeName(dto.getNodeName())
+                .oldNodeName(dto.getOldNodeName())
+                .nodeType(dto.getNodeType() != null ? com.crdt.model.FileNode.FileType.valueOf(dto.getNodeType()) : null)
+                .replicaId(dto.getReplicaId())
+                .timestamp(dto.getTimestamp())
+                .vectorClock(dto.getVectorClock())
+                .isApplied(dto.isApplied())
+                .build();
     }
 
     private CrdtOperationDto convertToDto(CrdtOperation operation) {
         CrdtOperationDto dto = new CrdtOperationDto();
         dto.setId(operation.getId());
-        dto.setType(operation.getType().toString());
         dto.setNodeId(operation.getNodeId());
         dto.setParentId(operation.getParentId());
         dto.setOldParentId(operation.getOldParentId());
         dto.setNodeName(operation.getNodeName());
+        dto.setOldNodeName(operation.getOldNodeName());
         if (operation.getNodeType() != null) {
             dto.setNodeType(operation.getNodeType().toString());
         }
