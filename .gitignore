@@ -1,0 +1,60 @@
+# Compiled class files
+*.class
+
+# Log files
+*.log
+logs/
+
+# Package Files
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+
+# Maven
+target/
+pom.xml.versionsBackup
+# Should not ignore .mvn/wrapper/maven-wrapper.jar if it's committed for consistent builds
+# .mvn/wrapper/maven-wrapper.jar
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Eclipse
+.project
+.classpath
+.settings/
+.buildpath
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Frontend (Node.js/Vue.js)
+fe/node_modules/
+fe/dist/
+fe/.env
+fe/.env.local
+fe/.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# fe/package-lock.json # Keep package-lock.json for consistent builds
+
+# Docker
+# .env # If .env contains sensitive info for Docker, it should be ignored.
+# Currently, docker-compose.yml references .env, so it might be needed.
+# If it's for local development, it's often ignored.
+
+# Temporary files
+*.tmp
+*~
+~*
+# Backup files
+*.bak
+*.swp

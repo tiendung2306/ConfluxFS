@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: crdt-postgres
+    environment:
+      POSTGRES_DB: crdt_filesystem
+      POSTGRES_USER: crdt_user
+      POSTGRES_PASSWORD: crdt_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - crdt-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: crdt-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - crdt-network
+
+  app:
+    build:
+      context: ./be
+      dockerfile: Dockerfile
+    container_name: crdt-backend
+    environment:
+      DB_USERNAME: crdt_user
+      DB_PASSWORD: crdt_password
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: crdt-file-system-secret-key-very-long-and-secure-for-production
+      REPLICA_ID: replica-1
+      FILE_STORAGE_PATH: /app/uploads
+      JAVA_OPTS: "-Xmx2g -Xms1g"
+    ports:
+      - "8080:8080"
+    volumes:
+      - file_storage:/app/uploads
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - crdt-network
+
+  frontend:
+    build:
+      context: ./fe
+      dockerfile: Dockerfile
+    container_name: crdt-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app
+    networks:
+      - crdt-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  file_storage:
+
+networks:
+  crdt-network:
+    driver: bridge

@@ -1,0 +1,85 @@
+spring:
+  application:
+    name: crdt-file-system
+  
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:5432/crdt_filesystem
+    username: ${DB_USERNAME:crdt_user}
+    password: ${DB_PASSWORD:crdt_password}
+    driver-class-name: org.postgresql.Driver
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      port: ${REDIS_PORT:6379}
+
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 104857600 # 100MB
+      max-request-size: 104857600 # 100MB
+      file-size-threshold: 1048576 # 1MB - write to disk if larger
+
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+  connection-timeout: 300000 # 5 minutes for large file uploads
+
+logging:
+  level:
+    com.crdt: DEBUG
+    org.springframework.security: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+
+# JWT Configuration
+jwt:
+  secret: ${JWT_SECRET:crdt-file-system-secret-key-very-long-and-secure}
+  expiration: 86400000 # 24 hours
+
+# File Storage Configuration
+file:
+  storage:
+    type: local # local, s3
+    path: ${FILE_STORAGE_PATH:./uploads}
+    max-size: 104857600 # 100MB
+
+# CRDT Configuration
+crdt:
+  replica:
+    id: ${REPLICA_ID:replica-1}
+  sync:
+    batch-size: 100
+    interval: 5000 # 5 seconds
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+# SpringDoc OpenAPI Configuration
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+    tagsSorter: alpha
+    tryItOutEnabled: true
+    disable-swagger-default-url: true
